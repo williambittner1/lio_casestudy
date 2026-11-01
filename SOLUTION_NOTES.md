@@ -6,6 +6,8 @@ This is a running record for the `improvements` branch. Update it as the solutio
 
 **Latest evaluation:** The previously outstanding 15-call benchmark was completed on 2026-11-01. All responses returned the expected quoted gross totals and base/alternative price patterns. This is not a complete field-level reliability score; see [pdf-benchmark.md](pdf-benchmark.md) for results, observed variation and configuration limits. Earlier dated notes below describe the status at the time and are retained as history.
 
+**Presentation update:** The interview deck now focuses on the changes delivered and uses a plain-language results slide to explain the test evidence and its limits. It retains the four agreed ideas for further work; see [handover.md](handover.md) for the latest files.
+
 ## Starting point
 
 The new-request page uploaded a PDF, the backend extracted plain text with `pypdf`, and a single OpenAI call extracted fields and chose a commodity group. The frontend populated an editable form. In an initial one-run-per-document check of the five supplied PDFs, all parsed, two extractions failed because a missing VAT ID was returned as `null`, and both quotes with alternatives showed alternatives as ordinary order lines. A later manual Dream in Green extraction displayed an incorrect total. See [quote-extraction-baseline.md](quote-extraction-baseline.md) for the detailed baseline.
