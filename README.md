@@ -33,7 +33,18 @@ Development happens in the **Acme Corp** organization, which has one of each rol
 | `buyer@acme.com` | buyer | approve requests |
 | `requester@acme.com` | requester | create & track requests |
 
-Every request needs approval by a buyer or admin (see the **Approvals** tab).
+For Acme, requests below €2,000 are approved automatically; requests at or
+above €2,000 need a buyer or admin to approve them. Changes to request contents
+or the attached document trigger a fresh approval check. An eligible smaller
+request is automatically approved again; otherwise it returns to pending.
+Status changes are separate workflow actions. Buyers and admins can approve
+their own pending requests; rejection of one's own request remains restricted.
+Other organizations retain manual approval for all amounts.
+Existing requests are not retroactively changed by the migration.
+
+Acme's categorization rules are visible to admins in **Organization → Settings**
+and documented in [handover.md](handover.md). The €20 monthly subscription
+threshold and its tax basis still need customer validation.
 
 Other tenants exist to show the multi-tenant setup — **Walmart, Schaeffler,
 Siemens, BMW** — each with an admin at `admin@<company>.com` (same password).
@@ -44,6 +55,7 @@ accounts, organizations, commodity groups, suppliers) — both steps are
 idempotent, so restarts never duplicate or overwrite anything (your data lives
 in the `postgres_data` volume; `docker compose down -v` resets it). The OpenAI
 key is only needed for PDF extraction — everything else works without it.
+Keep the key in the ignored `.env` file; `.env.example` is a tracked template.
 
 ## Local development
 
@@ -67,9 +79,21 @@ npm run dev
 ## Tests
 
 ```bash
-cd backend && python -m pytest      # API tests (in-memory SQLite)
-cd frontend && npx tsc --noEmit && npm run build
+# Backend: install project dependencies plus the test tools first.
+cd backend
+pip install -e . pytest httpx
+OPENAI_API_KEY= python -m pytest tests/ -q   # in-memory SQLite; no model calls
+
+# From the app root, test the frontend (Node 24 for the TypeScript test files).
+cd ../frontend
+node --test tests/*.test.mjs
+npx tsc --noEmit
+npm run build
 ```
+
+See [handover.md](handover.md), [SOLUTION_NOTES.md](SOLUTION_NOTES.md),
+and [pdf-benchmark.md](pdf-benchmark.md) for the implemented behavior,
+evidence, limitations and remaining work.
 
 ## Layout
 
