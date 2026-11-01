@@ -90,7 +90,9 @@ export interface ExtractedVendorData {
   vatId: string;
   department: string;
   orderLines: OrderLineInput[];
+  alternativeOrderLines: OrderLineInput[];
   totalCost: number;
+  taxRatePercent?: number | null;
   commodityGroupId: number | null;
   commodityGroupName: string | null;
 }
@@ -100,6 +102,18 @@ export interface ExtractionResponse {
   data?: ExtractedVendorData;
   error?: string;
   missingFields?: string[];
+  warnings?: string[];
+}
+
+export interface QuoteRegion {
+  field: string;
+  page: number;
+  category: 'vendor' | 'item';
+  matchKind?: 'price_row';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface Supplier {
@@ -170,7 +184,7 @@ export interface RequestActivity {
   id: string;
   request_id: string;
   actor_id: string | null;
-  action: 'created' | 'updated' | 'status_changed' | 'approved' | 'rejected' | 'document_attached';
+  action: 'created' | 'updated' | 'status_changed' | 'approved' | 'rejected' | 'document_attached' | 'auto_approved' | 'approval_reset';
   summary: string;
   detail: Record<string, unknown> | null;
   created_at: string;
@@ -270,6 +284,12 @@ export const organizations = {
 // ============================================================================
 
 export const commodityGroups = {
+  customerRules(): Promise<{ rules: { item: string; category: string; groupId: number; condition: string }[]; approvalPolicy: { limitEur: string } | null }> {
+    return apiFetch('/commodity-groups/customer-rules');
+  },
+  customerRule(title: string, orderLines: { positionDescription: string; unitPrice: number; amount: number; unit: string; totalPrice: number }[]): Promise<{ groupId: number | null; conflicting: boolean }> {
+    return apiFetch('/commodity-groups/customer-rule', { body: { title, orderLines } });
+  },
   list(): Promise<CommodityGroup[]> {
     return apiFetch('/commodity-groups');
   },
@@ -298,6 +318,12 @@ export const suppliers = {
 // ============================================================================
 
 export const articles = {
+  get(id: string): Promise<Article> {
+    return apiFetch(`/articles/${encodeURIComponent(id)}`);
+  },
+  suggest(description: string): Promise<Article[]> {
+    return apiFetch(`/articles/suggestions?${new URLSearchParams({ description }).toString()}`);
+  },
   list(params?: {
     search?: string;
     supplierId?: string;
@@ -322,10 +348,16 @@ export const articles = {
 // ============================================================================
 
 export const pdf = {
-  parse(file: File): Promise<{ text: string }> {
+  parse(file: File): Promise<{ text: string; warnings: string[] }> {
     const formData = new FormData();
     formData.append('file', file);
     return apiFetch('/pdf/parse', { formData });
+  },
+  highlightPreview(file: File, extracted: ExtractedVendorData): Promise<{ pdfBase64: string; matchedFields: string[]; unmatchedFields: string[]; regions: QuoteRegion[] }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('extracted', JSON.stringify(extracted));
+    return apiFetch('/pdf/highlight-preview', { formData });
   },
 };
 
