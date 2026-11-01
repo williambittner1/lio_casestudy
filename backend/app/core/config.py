@@ -22,9 +22,8 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str | None = None
-    # gpt-4o-mini keeps extraction snappy — latency matters on the upload flow,
-    # and larger models were noticeably slower without a real quality gain.
-    openai_model: str = "gpt-4o-mini"
+    # Configurable so extraction quality, latency and cost can be compared.
+    openai_model: str = "gpt-6-luna"
 
     # CORS — NoDecode lets us accept a plain comma-separated string instead of
     # the JSON list pydantic-settings would otherwise demand from env vars.
