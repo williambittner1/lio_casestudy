@@ -51,3 +51,5 @@ docker compose up --build
 ```
 
 See [SOLUTION_NOTES.md](SOLUTION_NOTES.md) for implementation decisions, test commands and detailed trade-offs.
+
+The interview presentation is available as an [editable PowerPoint](presentation/Lio_Acme_Case_Study_William_v5.pptx) and [PDF](presentation/Lio_Acme_Case_Study_William_v5.pdf).
