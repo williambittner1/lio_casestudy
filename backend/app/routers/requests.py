@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.deps import get_current_membership, require_buyer_or_admin
@@ -24,6 +24,8 @@ from app.schemas.requests import (
     RequestUpdate,
     StatusUpdate,
 )
+from app.services.acme_categories import acme_group, is_acme
+from app.services.approval_policy import ACME_AUTO_APPROVAL_LIMIT, auto_approval_applies, money
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -49,19 +51,34 @@ def _load_request_options():
     )
 
 
+def _request_visibility(membership: OrganizationMember):
+    filters = [ProcurementRequest.organization_id == membership.organization_id]
+    if membership.role == "requester":
+        # Old records can predate created_by; user_id is their original owner.
+        filters.append(or_(
+            ProcurementRequest.created_by == membership.user_id,
+            and_(ProcurementRequest.created_by.is_(None), ProcurementRequest.user_id == membership.user_id),
+        ))
+    return filters
+
+
 def _get_org_request(
-    db: Session, request_id: uuid.UUID, organization_id: uuid.UUID
+    db: Session, request_id: uuid.UUID, membership: OrganizationMember, *, for_update: bool = False,
 ) -> ProcurementRequest:
-    request = db.scalar(
+    stmt = (
         select(ProcurementRequest)
         .options(*_load_request_options())
         # Refresh already-loaded relationships (e.g. after an update commit).
         .execution_options(populate_existing=True)
         .where(
             ProcurementRequest.id == request_id,
-            ProcurementRequest.organization_id == organization_id,
+            *_request_visibility(membership),
         )
     )
+    # Serialize decisions and content edits for the same request in PostgreSQL.
+    if for_update:
+        stmt = stmt.with_for_update()
+    request = db.scalar(stmt)
     if request is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -76,6 +93,16 @@ def _validate_commodity_group(db: Session, commodity_group_id: int) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unknown commodity group id: {commodity_group_id}",
         )
+
+
+def _apply_acme_category(payload: RequestCreate | RequestUpdate, membership: OrganizationMember) -> None:
+    if not is_acme(membership):
+        return
+    group_id, conflicting = acme_group(payload.title, payload.order_lines)
+    if conflicting:
+        raise HTTPException(status_code=422, detail="Acme rules require different categories for these items. Create separate requests.")
+    if group_id is not None:
+        payload.commodity_group_id = group_id
 
 
 def _enforce_required_fields(
@@ -111,6 +138,27 @@ def _log_activity(
     )
 
 
+def _recheck_approval(db: Session, request: ProcurementRequest, membership: OrganizationMember, reason: str) -> None:
+    previous = request.approval_status or "pending"
+    auto = auto_approval_applies(membership, request.total_cost)
+    request.approved_by = None
+    if auto:
+        request.approval_status = "approved"
+        request.approval_source = "automatic"
+        request.approved_at = datetime.now(timezone.utc)
+        _log_activity(db, request.id, membership.user_id, "auto_approved",
+                      f"Automatically approved under Acme's €{ACME_AUTO_APPROVAL_LIMIT:,.0f} limit",
+                      {"reason": reason, "previous_status": previous, "limit_eur": str(ACME_AUTO_APPROVAL_LIMIT)})
+    else:
+        request.approval_status = "pending"
+        request.approval_source = None
+        request.approved_at = None
+        if previous != "pending":
+            _log_activity(db, request.id, membership.user_id, "approval_reset",
+                          "Approval required again after a change",
+                          {"reason": reason, "previous_status": previous})
+
+
 def _order_lines_signature(lines) -> list[tuple]:
     return [
         (
@@ -137,7 +185,7 @@ def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list
         changed.append("vat_id")
     if request.commodity_group_id != payload.commodity_group_id:
         changed.append("commodity_group_id")
-    if float(request.total_cost or 0) != float(payload.total_cost or 0):
+    if request.total_cost is None or money(request.total_cost) != money(payload.total_cost):
         changed.append("total_cost")
     if (request.department or "") != (payload.department or ""):
         changed.append("department")
@@ -158,7 +206,7 @@ def list_requests(
     requests = db.scalars(
         select(ProcurementRequest)
         .options(*_load_request_options())
-        .where(ProcurementRequest.organization_id == membership.organization_id)
+        .where(*_request_visibility(membership))
         .order_by(ProcurementRequest.created_at.desc())
     )
     return [RequestOut.model_validate(r) for r in requests]
@@ -171,7 +219,7 @@ def get_request(
     db: Session = Depends(get_db),
 ) -> RequestOut:
     return RequestOut.model_validate(
-        _get_org_request(db, request_id, membership.organization_id)
+        _get_org_request(db, request_id, membership)
     )
 
 
@@ -181,8 +229,10 @@ def create_request(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> RequestOut:
+    _apply_acme_category(payload, membership)
     _validate_commodity_group(db, payload.commodity_group_id)
     _enforce_required_fields(db, membership.organization_id, payload)
+    payload.total_cost = float(money(payload.total_cost))
 
     # Vendor fields are already cleaned up during extraction, so we can persist
     # them directly here.
@@ -198,6 +248,7 @@ def create_request(
         organization_id=membership.organization_id,
         created_by=membership.user_id,
         status="open",
+        approval_status="pending",
     )
     request.order_lines = [
         OrderLine(
@@ -213,9 +264,10 @@ def create_request(
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
+    _recheck_approval(db, request, membership, "created")
     db.commit()
 
-    request = _get_org_request(db, request.id, membership.organization_id)
+    request = _get_org_request(db, request.id, membership)
     return RequestOut.model_validate(request)
 
 
@@ -226,9 +278,11 @@ def update_request(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> RequestOut:
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership, for_update=True)
+    _apply_acme_category(payload, membership)
     _validate_commodity_group(db, payload.commodity_group_id)
     _enforce_required_fields(db, membership.organization_id, payload)
+    payload.total_cost = float(money(payload.total_cost))
 
     changed = _changed_fields(request, payload)
 
@@ -240,18 +294,18 @@ def update_request(
     request.total_cost = payload.total_cost
     request.department = payload.department
 
-    # Replace order lines (same semantics as the original delete-and-insert).
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    if "order_lines" in changed:
+        request.order_lines = [
+            OrderLine(
+                position_description=line.position_description,
+                unit_price=line.unit_price,
+                amount=line.amount,
+                unit=line.unit,
+                total_price=line.total_price,
+                line_order=index + 1,
+            )
+            for index, line in enumerate(payload.order_lines)
+        ]
 
     if changed:
         labels = [_FIELD_LABELS.get(f, f) for f in changed]
@@ -263,9 +317,10 @@ def update_request(
             f"Updated {', '.join(labels)}",
             {"changed_fields": changed},
         )
+        _recheck_approval(db, request, membership, "request_edited")
     db.commit()
 
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership)
     return RequestOut.model_validate(request)
 
 
@@ -276,7 +331,7 @@ def update_status(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> RequestOut:
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership, for_update=True)
 
     if request.status != payload.status:
         _log_activity(
@@ -290,7 +345,7 @@ def update_status(
         request.status = payload.status
         db.commit()
 
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership)
     return RequestOut.model_validate(request)
 
 
@@ -302,7 +357,13 @@ def decide_approval(
     db: Session = Depends(get_db),
 ) -> RequestOut:
     """Approve or reject a pending request (buyers and admins only)."""
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership, for_update=True)
+
+    if payload.decision == "rejected" and (request.created_by or request.user_id) == membership.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot reject your own request.",
+        )
 
     if request.approval_status != "pending":
         raise HTTPException(
@@ -311,6 +372,7 @@ def decide_approval(
         )
 
     request.approval_status = payload.decision
+    request.approval_source = "manual"
     request.approved_by = membership.user_id
     request.approved_at = datetime.now(timezone.utc)
     _log_activity(
@@ -322,7 +384,7 @@ def decide_approval(
     )
     db.commit()
 
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership)
     return RequestOut.model_validate(request)
 
 
@@ -332,7 +394,7 @@ def get_activity(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> list[RequestActivityOut]:
-    _get_org_request(db, request_id, membership.organization_id)  # scope check
+    _get_org_request(db, request_id, membership)  # scope check
     activity = db.scalars(
         select(RequestActivity)
         .where(RequestActivity.request_id == request_id)
@@ -349,7 +411,7 @@ async def upload_document(
     db: Session = Depends(get_db),
 ) -> None:
     """Attach (or replace) the original PDF for a request."""
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership, for_update=True)
 
     if file.content_type not in ("application/pdf", "application/x-pdf"):
         raise HTTPException(
@@ -365,6 +427,8 @@ async def upload_document(
     document = db.scalar(
         select(RequestDocument).where(RequestDocument.request_id == request.id)
     )
+    if document is not None and document.filename == (file.filename or "document.pdf") and document.content == content:
+        return
     if document is None:
         document = RequestDocument(request_id=request.id)
         db.add(document)
@@ -379,6 +443,7 @@ async def upload_document(
         "document_attached",
         f"Attached document {document.filename}",
     )
+    _recheck_approval(db, request, membership, "document_changed")
     db.commit()
 
 
@@ -388,7 +453,7 @@ def get_document(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> Response:
-    _get_org_request(db, request_id, membership.organization_id)  # scope check
+    _get_org_request(db, request_id, membership)  # scope check
     document = db.scalar(
         select(RequestDocument).where(RequestDocument.request_id == request_id)
     )
@@ -409,6 +474,6 @@ def delete_request(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> None:
-    request = _get_org_request(db, request_id, membership.organization_id)
+    request = _get_org_request(db, request_id, membership, for_update=True)
     db.delete(request)  # order lines, activity, document cascade
     db.commit()

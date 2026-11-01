@@ -172,7 +172,7 @@ export default function RequestsPage() {
                           APPROVAL_BADGE[request.approval_status]
                         }`}
                       >
-                        {titleCase(request.approval_status)}
+                        {request.approval_source === 'automatic' ? 'Auto-approved' : titleCase(request.approval_status)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-ink">

@@ -60,6 +60,7 @@ export type ProcurementRequest = {
   approval_status: 'pending' | 'approved' | 'rejected';
   approved_by: string | null;
   approved_at: string | null;
+  approval_source: 'automatic' | 'manual' | null;
   total_cost: number | null;
   created_at: string;
   updated_at: string;

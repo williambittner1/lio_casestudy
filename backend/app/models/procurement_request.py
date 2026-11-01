@@ -49,7 +49,7 @@ class ProcurementRequest(Base, TimestampMixin):
     # Status tracking
     status: Mapped[str] = mapped_column(String, nullable=False, default="open", index=True)
 
-    # Approval: every request needs sign-off by a buyer or admin.
+    # Approval can be decided manually or by an organization's policy.
     approval_status: Mapped[str] = mapped_column(
         String, nullable=False, default="pending", index=True
     )
@@ -59,6 +59,8 @@ class ProcurementRequest(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Null for pending requests and historical decisions whose source is unknown.
+    approval_source: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Financial
     total_cost: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)

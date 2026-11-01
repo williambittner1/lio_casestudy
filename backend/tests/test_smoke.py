@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import Article, CommodityGroup, RequestActivity, Supplier
+from app.models import Article, CommodityGroup, Organization, RequestActivity, Supplier
 from app.seed import seed
 
 # ---------------------------------------------------------------------------
@@ -319,10 +319,10 @@ def test_full_user_journey():
     )
     assert r.status_code == 404
 
-    # member sees the org's requests
+    # A requester cannot see the owner's request.
     r = client.get("/requests", headers=_auth(member_token))
     assert r.status_code == 200
-    assert len(r.json()) == 1
+    assert r.json() == []
 
     # members endpoint now shows 2 members, 0 pending invites
     r = client.get("/organizations/me/members", headers=_auth(owner_token))
@@ -419,9 +419,9 @@ def test_activity_log_and_document():
     payload = {
         "requestorName": "Alex Admin", "titleShortDescription": "Chairs",
         "vendorName": "FurnitureCo", "vatId": "DE1", "commodityGroupId": 15,
-        "totalCost": 500.0, "department": "Ops",
+        "totalCost": 5000.0, "department": "Ops",
         "orderLines": [
-            {"positionDescription": "Chair", "unitPrice": 250, "amount": 2, "unit": "pc", "totalPrice": 500}
+            {"positionDescription": "Chair", "unitPrice": 2500, "amount": 2, "unit": "pc", "totalPrice": 5000}
         ],
     }
     rid = client.post("/requests", json=payload, headers=_auth(admin)).json()["id"]
@@ -429,21 +429,24 @@ def test_activity_log_and_document():
     # edit two fields -> one 'updated' activity naming those fields
     updated = dict(payload)
     updated["title"] = "Office Chairs"
-    updated["totalCost"] = 600.0
+    updated["totalCost"] = 6000.0
     updated["orderLines"] = [
-        {"positionDescription": "Chair", "unitPrice": 300, "amount": 2, "unit": "pc", "totalPrice": 600}
+        {"positionDescription": "Chair", "unitPrice": 3000, "amount": 2, "unit": "pc", "totalPrice": 6000}
     ]
     # RequestUpdate uses "title" (not titleShortDescription)
     updated = {
         "requestorName": "Alex Admin", "title": "Office Chairs", "vendorName": "FurnitureCo",
-        "vatId": "DE1", "commodityGroupId": 15, "totalCost": 600.0, "department": "Ops",
+        "vatId": "DE1", "commodityGroupId": 15, "totalCost": 6000.0, "department": "Ops",
         "orderLines": updated["orderLines"],
     }
     r = client.put(f"/requests/{rid}", json=updated, headers=_auth(admin))
     assert r.status_code == 200, r.text
 
-    # approve, then a status change
-    client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(admin))
+    # A different buyer approves, then an admin changes the status.
+    buyer = client.post(
+        "/auth/signin", json={"email": "buyer@acme.com", "password": "demo1234"}
+    ).json()["access_token"]
+    assert client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(buyer)).status_code == 200
     client.patch(f"/requests/{rid}/status", json={"status": "closed"}, headers=_auth(admin))
 
     # attach a PDF
@@ -457,13 +460,16 @@ def test_activity_log_and_document():
         headers=_auth(admin),
     )
     assert r.status_code == 204, r.text
+    # Adding the document is an edit and invalidates the prior decision.
+    assert client.get(f"/requests/{rid}", headers=_auth(admin)).json()["approval_status"] == "pending"
+    assert client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(buyer)).status_code == 200
 
     # activity feed (newest first) captures every event
     r = client.get(f"/requests/{rid}/activity", headers=_auth(admin))
     assert r.status_code == 200
     actions = [a["action"] for a in r.json()]
     assert set(actions) == {
-        "created", "updated", "approved", "status_changed", "document_attached"
+        "created", "updated", "approved", "status_changed", "document_attached", "approval_reset"
     }
     updated_entry = next(a for a in r.json() if a["action"] == "updated")
     assert set(updated_entry["detail"]["changed_fields"]) == {
@@ -521,6 +527,175 @@ def _signin(email: str, password: str = "demo1234") -> str:
     r = client.post("/auth/signin", json={"email": email, "password": password})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
+
+
+def _policy_request(total: float) -> dict:
+    return {
+        "requestorName": "Requester", "titleShortDescription": "Desk",
+        "vendorName": "Vendor", "vatId": "", "commodityGroupId": 15,
+        "totalCost": total, "department": "Operations",
+        "orderLines": [{"positionDescription": "Desk", "unitPrice": total,
+                        "amount": 1, "unit": "piece", "totalPrice": total}],
+    }
+
+
+def _policy_update(payload: dict) -> dict:
+    return {**payload, "title": payload["titleShortDescription"]}
+
+
+def test_acme_auto_approval_is_scoped_and_rounds_at_the_boundary():
+    requester = _signin("requester@acme.com")
+    admin = _signin("admin@acme.com")
+    walmart = _signin("admin@walmart.com")
+    ids = []
+    try:
+        for amount, expected_status, expected_total in [
+            (0, "approved", 0), (1999.99, "approved", 1999.99),
+            (2000, "pending", 2000), (2000.01, "pending", 2000.01),
+            (1999.999, "pending", 2000), (1999.994, "approved", 1999.99),
+        ]:
+            response = client.post("/requests", json=_policy_request(amount), headers=_auth(requester))
+            assert response.status_code == 201, response.text
+            request = response.json()
+            ids.append(request["id"])
+            assert request["total_cost"] == expected_total
+            assert request["approval_status"] == expected_status
+            if expected_status == "approved":
+                assert request["approval_source"] == "automatic"
+                assert request["approved_by"] is None and request["approved_at"]
+                activity = client.get(f"/requests/{request['id']}/activity", headers=_auth(requester)).json()
+                assert any(a["action"] == "auto_approved" for a in activity)
+            else:
+                assert request["approval_source"] is None and request["approved_at"] is None
+        assert client.post("/requests", json=_policy_request(-1), headers=_auth(requester)).status_code == 422
+
+        response = client.post("/requests", json=_policy_request(100), headers=_auth(walmart))
+        assert response.status_code == 201, response.text
+        walmart_request = response.json()
+        assert walmart_request["approval_status"] == "pending"
+        assert walmart_request["approval_source"] is None
+        client.delete(f"/requests/{walmart_request['id']}", headers=_auth(walmart))
+    finally:
+        for rid in ids:
+            client.delete(f"/requests/{rid}", headers=_auth(admin))
+
+
+def test_all_request_content_edits_recheck_approval():
+    from copy import deepcopy
+    requester = _signin("requester@acme.com")
+    buyer = _signin("buyer@acme.com")
+    admin = _signin("admin@acme.com")
+    payload = _policy_request(2500)
+    created = client.post("/requests", json=payload, headers=_auth(requester)).json()
+    rid = created["id"]
+    updated = _policy_update(payload)
+    try:
+        changes = [
+            ("requestorName", "Edited requester"), ("title", "Edited title"),
+            ("vendorName", "Edited vendor"), ("vatId", "DE123456789"),
+            ("commodityGroupId", 31), ("department", "IT"),
+            ("totalCost", 2600),
+            ("orderLines", [{"positionDescription": "Desk with drawers", "unitPrice": 2600,
+                              "amount": 1, "unit": "piece", "totalPrice": 2600}]),
+        ]
+        for field, value in changes:
+            approved = client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(buyer))
+            assert approved.status_code == 200, approved.text
+            assert approved.json()["approval_source"] == "manual"
+            updated[field] = deepcopy(value)
+            result = client.put(f"/requests/{rid}", json=updated, headers=_auth(requester))
+            assert result.status_code == 200, result.text
+            assert result.json()["approval_status"] == "pending", field
+            assert result.json()["approved_by"] is None and result.json()["approved_at"] is None
+            assert result.json()["approval_source"] is None
+        activity = client.get(f"/requests/{rid}/activity", headers=_auth(requester)).json()
+        assert sum(a["action"] == "approval_reset" for a in activity) == len(changes)
+
+        # Submitting an unchanged form keeps the decision and existing line IDs.
+        approved = client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(buyer)).json()
+        saved = client.put(f"/requests/{rid}", json=updated, headers=_auth(requester)).json()
+        assert saved["approval_status"] == "approved"
+        assert saved["approved_by"] == approved["approved_by"]
+        assert saved["order_lines"][0]["id"] == approved["order_lines"][0]["id"]
+        # Workflow status transitions are not edits to request contents.
+        assert client.patch(f"/requests/{rid}/status", json={"status": "closed"}, headers=_auth(buyer)).json()["approval_status"] == "approved"
+    finally:
+        client.delete(f"/requests/{rid}", headers=_auth(admin))
+
+
+def test_edits_reapply_threshold_and_document_replacement_invalidates_approval():
+    requester = _signin("requester@acme.com")
+    buyer = _signin("buyer@acme.com")
+    admin = _signin("admin@acme.com")
+    payload = _policy_request(100)
+    rid = client.post("/requests", json=payload, headers=_auth(requester)).json()["id"]
+    update = _policy_update(payload)
+    try:
+        invalid = dict(update, totalCost=-1)
+        assert client.put(f"/requests/{rid}", json=invalid, headers=_auth(requester)).status_code == 422
+        assert client.get(f"/requests/{rid}", headers=_auth(requester)).json()["approval_status"] == "approved"
+        update["title"] = "Changed under threshold"
+        result = client.put(f"/requests/{rid}", json=update, headers=_auth(requester)).json()
+        assert result["approval_status"] == "approved" and result["approval_source"] == "automatic"
+        update["totalCost"] = 2000
+        result = client.put(f"/requests/{rid}", json=update, headers=_auth(requester)).json()
+        assert result["approval_status"] == "pending" and result["approval_source"] is None
+
+        first_file = {"file": ("quote.pdf", b"%PDF-first", "application/pdf")}
+        second_file = {"file": ("quote.pdf", b"%PDF-second", "application/pdf")}
+        assert client.put(f"/requests/{rid}/document", files=first_file, headers=_auth(requester)).status_code == 204
+        assert client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(buyer)).status_code == 200
+        assert client.put(f"/requests/{rid}/document", files=first_file, headers=_auth(requester)).status_code == 204
+        assert client.get(f"/requests/{rid}", headers=_auth(requester)).json()["approval_status"] == "approved"
+        assert client.put(f"/requests/{rid}/document", files=second_file, headers=_auth(requester)).status_code == 204
+        changed = client.get(f"/requests/{rid}", headers=_auth(requester)).json()
+        assert changed["approval_status"] == "pending" and changed["approved_by"] is None
+
+        update["totalCost"] = 1999.99
+        result = client.put(f"/requests/{rid}", json=update, headers=_auth(requester)).json()
+        assert result["approval_status"] == "approved" and result["approval_source"] == "automatic"
+    finally:
+        client.delete(f"/requests/{rid}", headers=_auth(admin))
+
+
+def test_legacy_missing_total_is_rechecked_when_set_to_zero():
+    from app.models import ProcurementRequest
+    requester = _signin("requester@acme.com")
+    admin = _signin("admin@acme.com")
+    payload = _policy_request(0)
+    rid = client.post("/requests", json=payload, headers=_auth(requester)).json()["id"]
+    try:
+        with TestingSession() as db:
+            request = db.get(ProcurementRequest, uuid.UUID(rid))
+            request.total_cost = None
+            request.approval_status = "pending"
+            request.approval_source = None
+            request.approved_at = None
+            db.commit()
+        result = client.put(f"/requests/{rid}", json=_policy_update(payload), headers=_auth(requester)).json()
+        assert result["total_cost"] == 0 and result["approval_source"] == "automatic"
+    finally:
+        client.delete(f"/requests/{rid}", headers=_auth(admin))
+
+
+def test_customer_rules_are_visible_only_to_the_applicable_organization():
+    assert client.get("/commodity-groups/customer-rules").status_code == 401
+    acme = _signin("admin@acme.com")
+    walmart = _signin("admin@walmart.com")
+    rules = client.get("/commodity-groups/customer-rules", headers=_auth(acme)).json()["rules"]
+    assert {r["groupId"] for r in rules} == {11, 29, 2001}
+    assert any("€20" in r["condition"] for r in rules)
+    assert client.get("/commodity-groups/customer-rules", headers=_auth(acme)).json()["approvalPolicy"] == {"limitEur": "2000.00"}
+    assert client.get("/commodity-groups/customer-rules", headers=_auth(walmart)).json() == {"rules": [], "approvalPolicy": None}
+
+
+def test_non_finite_totals_are_rejected_by_request_validation():
+    import pytest
+    from pydantic import ValidationError
+    from app.schemas.requests import RequestCreate
+    for amount in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValidationError):
+            RequestCreate.model_validate(_policy_request(amount))
 
 
 def test_suppliers_are_org_scoped_master_data():
@@ -595,6 +770,131 @@ def test_articles_catalog_paginated_and_searchable():
     other = _signin("admin@walmart.com")
     assert client.get("/articles/count", headers=_auth(other)).json()["count"] == 0
     assert client.get("/articles", headers=_auth(other)).json()["total"] == 0
+    article_id = found["items"][0]["id"]
+    detail = client.get(f"/articles/{article_id}", headers=_auth(token))
+    assert detail.status_code == 200
+    assert detail.json()["id"] == article_id
+    assert client.get(f"/articles/{article_id}", headers=_auth(other)).status_code == 404
+    assert client.get(f"/articles/{article_id}").status_code == 401
+
+
+def test_requester_can_only_access_their_own_requests():
+    requester = _signin("requester@acme.com")
+    buyer = _signin("buyer@acme.com")
+    admin = _signin("admin@acme.com")
+    other = _signin("admin@walmart.com")
+    payload = {"requestorName": "Requester", "titleShortDescription": "Desk", "vendorName": "Vendor",
+               "vatId": "", "commodityGroupId": 15, "totalCost": 100, "department": "",
+               "orderLines": [{"positionDescription": "Desk", "unitPrice": 100, "amount": 1, "unit": "piece", "totalPrice": 100}]}
+    own = client.post("/requests", json=payload, headers=_auth(requester)).json()["id"]
+    others = client.post("/requests", json=payload, headers=_auth(buyer)).json()["id"]
+    try:
+        file = {"file": ("quote.pdf", b"%PDF-1.4", "application/pdf")}
+        assert client.put(f"/requests/{others}/document", files=file, headers=_auth(buyer)).status_code == 204
+        ids = {item["id"] for item in client.get("/requests", headers=_auth(requester)).json()}
+        assert own in ids and others not in ids
+        assert client.get(f"/requests/{own}", headers=_auth(requester)).status_code == 200
+        assert client.get(f"/requests/{others}", headers=_auth(requester)).status_code == 404
+        assert client.get(f"/requests/{others}/activity", headers=_auth(requester)).status_code == 404
+        assert client.get(f"/requests/{others}/document", headers=_auth(requester)).status_code == 404
+        assert client.put(f"/requests/{others}/document", files=file, headers=_auth(requester)).status_code == 404
+        assert client.patch(f"/requests/{others}/status", json={"status": "closed"}, headers=_auth(requester)).status_code == 404
+        update = dict(payload, title=payload["titleShortDescription"])
+        assert client.put(f"/requests/{others}", json=update, headers=_auth(requester)).status_code == 404
+        assert client.delete(f"/requests/{others}", headers=_auth(requester)).status_code == 404
+        assert client.get(f"/requests/{own}", headers=_auth(buyer)).status_code == 200
+        assert client.get(f"/requests/{others}", headers=_auth(admin)).status_code == 200
+        assert client.get(f"/requests/{own}", headers=_auth(other)).status_code == 404
+
+        # Legacy records use user_id when created_by is absent.
+        from app.models import ProcurementRequest
+        with TestingSession() as db:
+            db.get(ProcurementRequest, uuid.UUID(own)).created_by = None
+            db.commit()
+        assert client.get(f"/requests/{own}", headers=_auth(requester)).status_code == 200
+    finally:
+        client.delete(f"/requests/{own}", headers=_auth(admin))
+        client.delete(f"/requests/{others}", headers=_auth(admin))
+
+
+def test_article_suggestions_are_ranked_and_tenant_scoped():
+    assert client.get("/articles/suggestions", params={"description": "docking station"}).status_code == 401
+    acme = _signin("requester@acme.com")
+    walmart = _signin("admin@walmart.com")
+    response = client.get("/articles/suggestions", params={"description": "USB-C docking station"}, headers=_auth(acme))
+    assert response.status_code == 200
+    matches = response.json()
+    assert 0 < len(matches) <= 5
+    assert all("docking" in item["description"].lower() and "station" in item["description"].lower() for item in matches)
+    assert matches[0]["supplier_name"] and matches[0]["unit_price"]
+    assert client.get("/articles/suggestions", params={"description": "USB-C docking station"}, headers=_auth(walmart)).json() == []
+    assert client.get("/articles/suggestions", params={"description": "RHE-00001"}, headers=_auth(acme)).json()[0]["article_number"] == "RHE-00001"
+    assert client.get("/articles/suggestions", params={"description": "xyzunmatched"}, headers=_auth(acme)).json() == []
+    moss_matches = client.get("/articles/suggestions", params={"description": "Moosbild mit Schriftzug"}, headers=_auth(acme)).json()
+    assert moss_matches and all("moss" in item["description"].lower() for item in moss_matches)
+
+    # Both organizations have matching articles; neither should see the other's.
+    with TestingSession() as db:
+        walmart_org = db.scalar(select(Organization).where(Organization.slug == "walmart"))
+        supplier = Supplier(organization_id=walmart_org.id, name="Walmart-only supplier")
+        db.add(supplier)
+        db.flush()
+        article = Article(organization_id=walmart_org.id, supplier_id=supplier.id,
+                          article_number="WMT-TEST", description="USB docking station",
+                          unit_price=99, currency="EUR", unit="piece", quantity=1)
+        db.add(article)
+        db.commit()
+        supplier_id = supplier.id
+    try:
+        walmart_matches = client.get("/articles/suggestions", params={"description": "USB docking station"}, headers=_auth(walmart)).json()
+        acme_matches = client.get("/articles/suggestions", params={"description": "USB docking station"}, headers=_auth(acme)).json()
+        assert [item["article_number"] for item in walmart_matches] == ["WMT-TEST"]
+        assert acme_matches and all(item["article_number"] != "WMT-TEST" for item in acme_matches)
+    finally:
+        with TestingSession() as db:
+            db.delete(db.get(Supplier, supplier_id))
+            db.commit()
+
+
+def test_acme_rules_on_create_update_and_other_tenant():
+    acme = _signin('requester@acme.com')
+    walmart = _signin('admin@walmart.com')
+    payload = {'requestorName': 'Test', 'titleShortDescription': 'Office order', 'vendorName': 'Vendor',
+               'vatId': '', 'commodityGroupId': 15, 'totalCost': 15, 'department': '',
+               'orderLines': [{'positionDescription': 'Kabelbinder', 'unitPrice': 15, 'amount': 1, 'unit': 'piece', 'totalPrice': 15}]}
+    rule_payload = {'title': payload['titleShortDescription'], 'orderLines': payload['orderLines']}
+    assert client.post('/commodity-groups/customer-rule', json=rule_payload, headers=_auth(acme)).json()['groupId'] == 11
+    assert client.post('/commodity-groups/customer-rule', json=rule_payload, headers=_auth(walmart)).json()['groupId'] is None
+    response = client.post('/requests', json=payload, headers=_auth(acme))
+    assert response.status_code == 201 and response.json()['commodity_group_id'] == 11
+    other = client.post('/requests', json=payload, headers=_auth(walmart))
+    assert other.status_code == 201 and other.json()['commodity_group_id'] == 15
+    update = dict(payload, title=payload['titleShortDescription'])
+    update['orderLines'] = [{'positionDescription': 'Toner cartridge', 'unitPrice': 15, 'amount': 1, 'unit': 'piece', 'totalPrice': 15}]
+    changed = client.put(f"/requests/{response.json()['id']}", json=update, headers=_auth(acme))
+    assert changed.status_code == 200 and changed.json()['commodity_group_id'] == 29
+    payload['orderLines'] = [{'positionDescription': 'Software subscription monthly', 'unitPrice': 20, 'amount': 1, 'unit': 'month', 'totalPrice': 20}]
+    subscription = client.post('/requests', json=payload, headers=_auth(acme))
+    assert subscription.status_code == 201 and subscription.json()['commodity_group_id'] == 2001
+    payload['orderLines'].append({'positionDescription': 'Kabelbinder', 'unitPrice': 1, 'amount': 1, 'unit': 'piece', 'totalPrice': 1})
+    payload['orderLines'].append({'positionDescription': 'Toner', 'unitPrice': 1, 'amount': 1, 'unit': 'piece', 'totalPrice': 1})
+    assert client.post('/requests', json=payload, headers=_auth(acme)).status_code == 422
+
+
+def test_acme_rule_applies_during_pdf_extraction_only_for_acme(monkeypatch):
+    from app.schemas.extraction import ExtractedVendorData, ExtractionResponse
+    from app.routers import extraction as extraction_router
+
+    def fake_extraction(text, db):
+        data = ExtractedVendorData.model_validate({'title': 'Toner', 'commodityGroupId': 15,
+            'commodityGroupName': 'Office Equipment', 'orderLines': [{'positionDescription': 'Printer toner'}]})
+        return ExtractionResponse(success=True, data=data)
+
+    monkeypatch.setattr(extraction_router, 'extract_vendor_data', fake_extraction)
+    acme = client.post('/extraction', json={'text': 'test'}, headers=_auth(_signin('requester@acme.com')))
+    walmart = client.post('/extraction', json={'text': 'test'}, headers=_auth(_signin('admin@walmart.com')))
+    assert acme.json()['data']['commodityGroupId'] == 29
+    assert walmart.json()['data']['commodityGroupId'] == 15
 
 
 def test_seed_is_idempotent():
@@ -655,6 +955,16 @@ def test_approval_flow_with_roles():
             {"positionDescription": "Laptop", "unitPrice": 1400, "amount": 3, "unit": "pc", "totalPrice": 4200}
         ],
     }
+    # Buyers and admins may approve their own pending requests. Self-rejection
+    # remains restricted; the requester role has no approval privileges.
+    for reviewer in (buyer, admin):
+        own = client.post("/requests", json=payload, headers=_auth(reviewer)).json()["id"]
+        assert client.patch(f"/requests/{own}/approval", json={"decision": "rejected"}, headers=_auth(reviewer)).status_code == 403
+        response = client.patch(f"/requests/{own}/approval", json={"decision": "approved"}, headers=_auth(reviewer))
+        assert response.status_code == 200
+        assert response.json()["approval_status"] == "approved"
+        assert response.json()["approved_by"] is not None
+        client.delete(f"/requests/{own}", headers=_auth(admin))
     r = client.post("/requests", json=payload, headers=_auth(requester))
     assert r.status_code == 201, r.text
     request_id = r.json()["id"]
