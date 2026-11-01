@@ -8,7 +8,8 @@ Negotiated catalog suggestions are scoped to the organization and shown alongsid
 
 - The backend regression and smoke suite passed 72 tests; the frontend tests and type checking passed.
 - A live API benchmark parsed each of five supplied quotes once and extracted each three times. All 15 responses returned the expected quoted gross totals and base/alternative price patterns. The three OCR-supplemented styleGREEN responses included the supplier and VAT ID. See [pdf-benchmark.md](pdf-benchmark.md) for the methodology, variation and limitations.
-- The effective model and exact running image were not independently verified for that benchmark. Rebuild Docker and check the requester, buyer and admin flows and the €2,000 boundary on the actual stack before handover.
+- The case-study author manually checked the Acme approval boundary: €1,999.99 was automatically approved and €2,000 required manual approval.
+- The effective model and exact running image were not independently verified for the benchmark. Rebuild Docker, check the requester, buyer and admin flows, and confirm the approval migration has applied.
 
 ## Trade-offs and next steps
 

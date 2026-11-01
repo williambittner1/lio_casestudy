@@ -1,6 +1,6 @@
 # Lio procurement case study — handover
 
-**Status:** Implemented on the `improvements` branch; final Docker verification and the PR are still to be completed. PDF extraction, quote review, negotiated article suggestions, Acme-specific categorisation and the approval threshold are included.
+**Status:** Implemented on the `improvements` branch and submitted in the pull request. PDF extraction, quote review, negotiated article suggestions, Acme-specific categorisation and the approval threshold are included. A full role walkthrough on the rebuilt Docker stack remains to be completed.
 
 ## What changed
 
@@ -20,6 +20,7 @@
 - The initial baseline covered all five supplied quotes once. A subsequent live benchmark parsed each quote once and extracted each three times: 15/15 successful responses and expected gross totals, with the expected base and alternative price patterns. StyleGREEN returned FlowerArt GmbH and its VAT ID in all three OCR-supplemented runs. See [pdf-benchmark.md](pdf-benchmark.md) for the detailed results and limitations.
 - For styleGREEN, an earlier live retest after OCR recovered **FlowerArt GmbH**, the VAT ID, three line items and the quoted total. This was a single run under the earlier configuration, not a reliability benchmark or a combined OCR-plus-Luna check.
 - The backend regression and smoke suites passed 72 tests, covering model parameters, Acme rules, PDF matching, approval boundaries, editing, requester isolation and tenant isolation. All 19 frontend tests passed, covering catalog price selection, quote links and explicit entry of missing totals. Browser walkthroughs against the real backend and disposable SQLite databases checked automatic approval, edits, the rules screen, buyer self-approval, and saved-request matching in both directions across two PDF pages. Earlier quote-view and catalog checks used a local mock.
+- The case-study author manually checked the Acme approval boundary: €1,999.99 was automatically approved, and €2,000 required manual approval.
 - The approval-source migration was checked on a temporary PostgreSQL table with rollback, preserving existing decisions. Whether the running Docker stack has applied it has not been independently confirmed.
 - Frontend type checking and the local production build passed, including the new article detail page. Docker Compose still needs an end-to-end check with the rebuilt images.
 - OCR is limited to the first six selected pages and can misread or miss image text. AI output and alternative classification still need human review. PDF highlights are contextual matches, not proven provenance: ambiguous, paraphrased or unrecognized OCR text may remain unhighlighted. The repeated evaluation covers only five PDFs and one OCR parse per quote; it does not verify frontend behavior or general reliability.
@@ -32,10 +33,9 @@
 
 ## Remaining work
 
-1. Rebuild Docker and walk through the PDFs, requester/buyer/admin roles, and the €1,999.99 / €2,000 approval boundary with the real stack.
+1. Rebuild Docker and walk through the PDFs and requester/buyer/admin roles on the real stack; confirm the approval migration is applied.
 2. Validate the €20-per-month assumption, tax basis, billing periods, and the approval total's gross/net meaning with Acme.
 3. Expand the evaluation to unseen quotes and more scanned layouts as time and API budget allow.
-4. Review the changes, commit and push the branch, and open the final PR. See [INTERVIEW_PREP.md](INTERVIEW_PREP.md) for a suggested walkthrough.
 
 ## Product ideas for more time
 

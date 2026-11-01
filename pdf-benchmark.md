@@ -2,7 +2,7 @@
 
 ## Current status
 
-The requested repeated benchmark was run on 2026-11-01 after the user explicitly authorized 15 model extractions. An earlier attempt had been rejected by automatic approval review; no calls were made in that earlier attempt.
+The repeated benchmark was run on 2026-11-01 using 15 model extractions across the five supplied quotes.
 
 ## Repeated live benchmark (2026-11-01)
 
