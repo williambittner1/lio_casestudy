@@ -6,7 +6,7 @@ This is a running record for the `improvements` branch. Update it as the solutio
 
 **Latest evaluation:** The previously outstanding 15-call benchmark was completed on 2026-11-01. All responses returned the expected quoted gross totals and base/alternative price patterns. This is not a complete field-level reliability score; see [pdf-benchmark.md](pdf-benchmark.md) for results, observed variation and configuration limits. Earlier dated notes below describe the status at the time and are retained as history.
 
-**Presentation update:** The interview deck now focuses on the changes delivered and uses a plain-language results slide to explain the test evidence and its limits. It retains the four agreed ideas for further work; see [handover.md](handover.md) for the latest files.
+**Presentation update:** The interview deck focuses on the changes delivered and uses a plain-language results slide to explain the test evidence and its limits. The future-work slide describes better catalog matches across languages and checks for units and contract terms; its speaker notes clarify that semantic search is a future proposal. See [handover.md](handover.md) for the latest files.
 
 ## Starting point
 
