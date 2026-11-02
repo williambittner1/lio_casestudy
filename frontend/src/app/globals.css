@@ -10,6 +10,18 @@
   --foreground: #0b0d10;
 }
 
+/* Keep the viewport width stable when navigating between short and long pages. */
+html {
+  overflow-y: scroll;
+}
+
+@supports (scrollbar-gutter: stable) {
+  html {
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

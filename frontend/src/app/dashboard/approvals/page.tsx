@@ -8,6 +8,7 @@ import type { ProcurementRequestWithDetails } from '@/types/database';
 export default function ApprovalsPage() {
   const [requests, setRequests] = useState<ProcurementRequestWithDetails[]>([]);
   const [role, setRole] = useState<api.MemberRole | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -20,11 +21,13 @@ export default function ApprovalsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [org, list] = await Promise.all([
+      const [org, list, me] = await Promise.all([
         api.organizations.getMine(),
         api.requests.list(),
+        api.auth.me(),
       ]);
       setRole(org.role);
+      setUserId(me.user.id);
       setRequests(list);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load requests');
@@ -116,7 +119,7 @@ export default function ApprovalsPage() {
                     >
                       Approve
                     </Button>
-                    <Button
+                    {(request.created_by || request.user_id) !== userId && <Button
                       size="sm"
                       variant="outline"
                       className="text-red-600 border-red-300 hover:bg-red-50"
@@ -124,7 +127,7 @@ export default function ApprovalsPage() {
                       disabled={deciding === request.id}
                     >
                       Reject
-                    </Button>
+                    </Button>}
                   </div>
                 )}
               </div>
@@ -158,7 +161,7 @@ export default function ApprovalsPage() {
                       : 'bg-red-100 text-red-700'
                   }`}
                 >
-                  {request.approval_status}
+                  {request.approval_source === 'automatic' ? 'Auto-approved' : request.approval_status}
                 </span>
               </div>
             ))}

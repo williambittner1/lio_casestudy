@@ -26,6 +26,8 @@ export default function OrganizationPage() {
   const [organizationName, setOrganizationName] = useState<string>('');
   const [role, setRole] = useState<api.MemberRole | null>(null);
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
+  const [categoryRules, setCategoryRules] = useState<{ item: string; category: string; groupId: number; condition: string }[]>([]);
+  const [approvalPolicy, setApprovalPolicy] = useState<{ limitEur: string } | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
 
   useEffect(() => {
@@ -41,13 +43,16 @@ export default function OrganizationPage() {
       setOrganizationName(org.name);
       setRole(org.role);
 
-      const [result, settings] = await Promise.all([
+      const [result, settings, rules] = await Promise.all([
         api.organizations.getMembers(),
         api.organizations.getSettings(),
+        api.commodityGroups.customerRules(),
       ]);
       setMembers(result.members);
       setInvites(result.invites);
       setRequiredFields(settings.required_fields);
+      setCategoryRules(rules.rules);
+      setApprovalPolicy(rules.approvalPolicy);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -267,6 +272,7 @@ export default function OrganizationPage() {
       )}
 
       {tab === 'settings' && (
+        <div className="space-y-6">
         <div className="lio-card p-6">
           <h2 className="text-xl font-semibold tracking-tight text-ink">Request Settings</h2>
           <p className="text-sm text-ink/55 mt-1 mb-4">
@@ -292,6 +298,29 @@ export default function OrganizationPage() {
               );
             })}
           </div>
+        </div>
+        {categoryRules.length > 0 && (
+          <div className="lio-card p-6">
+            <h2 className="text-xl font-semibold tracking-tight text-ink">Commodity group rules</h2>
+            <p className="mt-1 text-sm text-ink/55">Applied automatically to requests for this organization.</p>
+            <dl className="mt-4 divide-y divide-line">
+              {categoryRules.map(rule => (
+                <div key={rule.groupId} className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+                  <div><dt className="text-sm font-medium text-ink">{rule.item}</dt><dd className="mt-1 text-xs text-ink/55">{rule.condition}</dd></div>
+                  <dd className="shrink-0 text-sm font-medium text-accent-deep">{rule.category} · {rule.groupId}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="mt-4 text-xs text-ink/55">If a request matches conflicting rules, create separate requests.</p>
+          </div>
+        )}
+        {approvalPolicy && (
+          <div className="lio-card p-6">
+            <h2 className="text-xl font-semibold tracking-tight text-ink">Approval rule</h2>
+            <p className="mt-2 text-sm text-ink/70">Requests below €{Number(approvalPolicy.limitEur).toLocaleString('de-DE')} are approved automatically.</p>
+            <p className="mt-1 text-sm text-ink/55">Edits trigger a new approval check. Requests at or above the limit need a buyer or admin.</p>
+          </div>
+        )}
         </div>
       )}
     </div>

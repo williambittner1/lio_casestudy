@@ -26,7 +26,7 @@ class RequestCreate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    total_cost: float = Field(alias="totalCost", ge=0, le=9999999999.99, allow_inf_nan=False)
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1)
 
@@ -37,7 +37,7 @@ class RequestUpdate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    total_cost: float = Field(alias="totalCost", ge=0, le=9999999999.99, allow_inf_nan=False)
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines")
 
@@ -105,6 +105,7 @@ class RequestOut(BaseModel):
     approval_status: ApprovalStatus
     approved_by: uuid.UUID | None
     approved_at: datetime | None
+    approval_source: Literal["manual", "automatic"] | None = None
     total_cost: float | None
     created_at: datetime
     updated_at: datetime

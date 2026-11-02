@@ -1,11 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import * as api from '@/lib/api';
 import { Button, Input, Alert } from '@/components/base';
+import { QuoteViewer } from '@/components/QuoteViewer';
 import { useCommodityGroups } from '@/lib/hooks/useCommodityGroups';
+import { parseRequestTotal } from '@/lib/requestPricing';
+import { savedQuoteData, savedQuoteFieldTarget } from '@/lib/quoteLinks';
 import type { ProcurementRequestWithDetails } from '@/types/database';
 
 const STATUS_BADGE: Record<string, string> = {
@@ -30,7 +33,12 @@ export default function RequestDetailPage() {
   const [request, setRequest] = useState<ProcurementRequestWithDetails | null>(null);
   const [activity, setActivity] = useState<api.RequestActivity[]>([]);
   const [role, setRole] = useState<api.MemberRole | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [regions, setRegions] = useState<api.QuoteRegion[]>([]);
+  const [activeField, setActiveField] = useState<string | null>(null);
+  const [matching, setMatching] = useState(false);
+  const [matchingUnavailable, setMatchingUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -40,18 +48,20 @@ export default function RequestDetailPage() {
   // Edit form state
   const [form, setForm] = useState({
     requestorName: '', title: '', vendorName: '', vatId: '', department: '',
-    commodityGroupId: null as number | null, totalCost: 0,
+    commodityGroupId: null as number | null, totalCost: '',
   });
 
   const load = async () => {
     try {
-      const [req, org, acts] = await Promise.all([
+      const [req, org, acts, me] = await Promise.all([
         api.requests.get(id),
         api.organizations.getMine(),
         api.requests.getActivity(id),
+        api.auth.me(),
       ]);
       setRequest(req);
       setRole(org.role);
+      setUserId(me.user.id);
       setActivity(acts);
       const url = await api.requests.documentUrl(id).catch(() => null);
       setPdfUrl(url);
@@ -72,6 +82,28 @@ export default function RequestDetailPage() {
       if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     };
   }, [pdfUrl]);
+
+  // A saved request does not retain extraction coordinates. Recompute possible
+  // matches from its current values and the stored document, without using AI.
+  const savedQuoteJson = useMemo(() => request ? JSON.stringify(savedQuoteData(request)) : null, [request]);
+  useEffect(() => {
+    let cancelled = false;
+    setRegions([]); setActiveField(null); setMatchingUnavailable(false);
+    if (!pdfUrl || !savedQuoteJson) { setMatching(false); return; }
+    setMatching(true);
+    (async () => {
+      try {
+        const blob = await (await fetch(pdfUrl)).blob();
+        const result = await api.pdf.highlightPreview(new File([blob], 'quote.pdf', { type: 'application/pdf' }), JSON.parse(savedQuoteJson));
+        if (!cancelled) setRegions(result.regions || []);
+      } catch {
+        if (!cancelled) setMatchingUnavailable(true);
+      } finally {
+        if (!cancelled) setMatching(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pdfUrl, savedQuoteJson]);
 
   const refresh = async () => {
     const [req, acts] = await Promise.all([
@@ -120,6 +152,7 @@ export default function RequestDetailPage() {
 
   const openEdit = () => {
     if (!request) return;
+    setError(''); setSuccess('');
     setForm({
       requestorName: request.requestor_name,
       title: request.title,
@@ -127,22 +160,27 @@ export default function RequestDetailPage() {
       vatId: request.vat_id || '',
       department: request.department || '',
       commodityGroupId: request.commodity_group_id,
-      totalCost: request.total_cost || 0,
+      totalCost: request.total_cost == null ? '' : String(request.total_cost),
     });
     setEditing(true);
   };
 
   const saveEdit = async () => {
     if (!request) return;
+    const total = parseRequestTotal(form.totalCost);
+    if (total === null) {
+      setError('Enter a non-negative total before saving.');
+      return;
+    }
     setBusy(true); setError(''); setSuccess('');
     try {
-      await api.requests.update(id, {
+      const saved = await api.requests.update(id, {
         requestorName: form.requestorName,
         title: form.title,
         vendorName: form.vendorName,
         vatId: form.vatId,
         commodityGroupId: form.commodityGroupId || 0,
-        totalCost: form.totalCost,
+        totalCost: total,
         department: form.department,
         orderLines: (request.order_lines || []).map((l) => ({
           positionDescription: l.position_description,
@@ -153,7 +191,9 @@ export default function RequestDetailPage() {
         })),
       });
       setEditing(false);
-      setSuccess('Request updated.');
+      setSuccess(saved.approval_source === 'automatic'
+        ? 'Request saved. Approval was checked and remains automatic.'
+        : `Request saved. Approval status: ${saved.approval_status}.`);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update request');
@@ -183,6 +223,20 @@ export default function RequestDetailPage() {
   }
 
   const canApprove = (role === 'buyer' || role === 'admin') && request.approval_status === 'pending';
+  const isOwn = (request.created_by || request.user_id) === userId;
+  const matched = new Set(regions.map(region => region.field));
+  const sourceValue = (field: string, value: ReactNode) => (
+    <SourceValue field={field} value={value} matched={matched.has(field)} active={activeField === field}
+      onActive={setActiveField} target={savedQuoteFieldTarget(field, request.order_lines?.length || 0)} />
+  );
+  const selectQuoteField = (field: string) => {
+    const target = savedQuoteFieldTarget(field, request.order_lines?.length || 0);
+    if (!target || !matched.has(field)) return;
+    setActiveField(field);
+    const element = document.getElementById(target);
+    element?.focus();
+    element?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+  };
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -199,7 +253,7 @@ export default function RequestDetailPage() {
               {titleCase(request.status)}
             </span>
             <span className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${APPROVAL_BADGE[request.approval_status]}`}>
-              {titleCase(request.approval_status)}
+              {request.approval_source === 'automatic' ? 'Auto-approved' : titleCase(request.approval_status)}
             </span>
           </div>
         </div>
@@ -207,8 +261,8 @@ export default function RequestDetailPage() {
           {canApprove && (
             <>
               <Button size="sm" onClick={() => decide('approved')} disabled={busy}>Approve</Button>
-              <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
-                onClick={() => decide('rejected')} disabled={busy}>Reject</Button>
+              {!isOwn && <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
+                onClick={() => decide('rejected')} disabled={busy}>Reject</Button>}
             </>
           )}
           <Button size="sm" variant="outline" onClick={openEdit} disabled={busy}>Edit</Button>
@@ -247,15 +301,15 @@ export default function RequestDetailPage() {
             <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
               <Field label="Requestor" value={request.requestor_name} />
               <Field label="Department" value={request.department || '—'} />
-              <Field label="Vendor" value={request.vendor_name} />
-              <Field label="VAT ID" value={request.vat_id || '—'} />
+              <Field label="Vendor" value={sourceValue('Vendor name', request.vendor_name)} />
+              <Field label="VAT ID" value={sourceValue('VAT ID', request.vat_id || '—')} />
               <Field
                 label="Commodity Group"
                 value={request.commodity_groups
                   ? `${request.commodity_groups.category} · ${request.commodity_groups.name}`
                   : '—'}
               />
-              <Field label="Total Cost" value={euro(request.total_cost)} />
+              <Field label="Total Cost" value={sourceValue('Total cost', euro(request.total_cost))} />
             </dl>
           </div>
 
@@ -265,12 +319,12 @@ export default function RequestDetailPage() {
               {request.order_lines?.map((line, i) => (
                 <div key={line.id} className="flex justify-between items-start bg-ink-800/[0.02] rounded-lg p-3">
                   <div>
-                    <p className="text-sm font-medium text-ink">{i + 1}. {line.position_description}</p>
+                    <p className="text-sm font-medium text-ink">{i + 1}. {sourceValue(`Line ${i + 1} description`, line.position_description)}</p>
                     <p className="text-sm text-ink/55 mt-0.5">
-                      {line.amount} {line.unit} × {euro(line.unit_price)}
+                      {sourceValue(`Line ${i + 1} amount`, line.amount)}{' '}{sourceValue(`Line ${i + 1} unit`, line.unit)} × {sourceValue(`Line ${i + 1} unit price`, euro(line.unit_price))}
                     </p>
                   </div>
-                  <p className="text-sm font-semibold text-ink">{euro(line.total_price)}</p>
+                  <p className="text-sm font-semibold text-ink">{sourceValue(`Line ${i + 1} line total`, euro(line.total_price))}</p>
                 </div>
               ))}
             </div>
@@ -294,14 +348,18 @@ export default function RequestDetailPage() {
         </div>
 
         {/* Right column: PDF viewer */}
-        <div className="lio-card p-6">
-          <h2 className="text-lg font-semibold tracking-tight text-ink mb-4">Original Document</h2>
+        <div className="lio-card overflow-hidden self-start lg:sticky lg:top-4">
+          <div className="px-5 py-4 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold tracking-tight text-ink">Original Document</h2>
+            {pdfUrl && <a href={pdfUrl} target="_blank" rel="noreferrer" className="text-sm text-accent-deep hover:underline">Open PDF</a>}
+          </div>
           {pdfUrl ? (
-            <iframe
-              src={pdfUrl}
-              title="Original PDF"
-              className="w-full h-[720px] rounded-lg border border-line"
-            />
+            <>
+              <p className="px-5 pb-3 text-xs text-ink/55" aria-live="polite">
+                {matching ? 'Finding possible matches…' : matchingUnavailable ? 'Highlights unavailable. The original PDF is shown.' : regions.some(region => region.matchKind === 'price_row') ? 'Some item rows are inferred from prices and quantity. Check all matches against the quote.' : 'Highlights are possible matches to saved values. Review them against the quote.'}
+              </p>
+              <QuoteViewer url={pdfUrl} regions={regions} activeField={activeField} onActiveField={setActiveField} onSelectField={selectQuoteField} />
+            </>
           ) : (
             <div className="h-[720px] rounded-lg border border-dashed border-line flex items-center justify-center text-center px-6">
               <p className="text-sm text-ink/45">
@@ -325,8 +383,10 @@ export default function RequestDetailPage() {
           >
             <div className="border-b border-line p-6">
               <h2 className="text-2xl font-semibold tracking-tight text-ink">Edit Request</h2>
+              <p className="mt-1 text-sm text-ink/55">Changes trigger a new approval check.</p>
             </div>
             <div className="p-6 space-y-4">
+              {error && <Alert variant="error">{error}</Alert>}
               <div className="grid grid-cols-2 gap-4">
                 <Input label="Requestor Name *" value={form.requestorName}
                   onChange={(e) => setForm({ ...form, requestorName: e.target.value })} />
@@ -354,9 +414,9 @@ export default function RequestDetailPage() {
                   ))}
                 </select>
               </div>
-              <Input label="Total Cost (€) *" type="number" step="0.01" value={form.totalCost}
-                onChange={(e) => setForm({ ...form, totalCost: parseFloat(e.target.value) || 0 })} />
-              <p className="text-xs text-ink/45">Order lines are edited from the request creation flow.</p>
+              <Input label="Total Cost (€) *" type="number" min="0" step="0.01" value={form.totalCost}
+                onChange={(e) => setForm({ ...form, totalCost: e.target.value })} />
+              <p className="text-xs text-ink/45">Order lines cannot be edited here after creation.</p>
             </div>
             <div className="border-t border-line p-6 bg-ink-800/[0.02] flex gap-3">
               <Button onClick={saveEdit} loading={busy} disabled={busy} className="flex-1">Save Changes</Button>
@@ -371,11 +431,23 @@ export default function RequestDetailPage() {
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function Field({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <dt className="text-ink/45 font-medium">{label}</dt>
       <dd className="text-ink mt-0.5">{value}</dd>
     </div>
   );
+}
+
+function SourceValue({ field, value, matched, active, target, onActive }: {
+  field: string; value: ReactNode; matched: boolean; active: boolean; target: string | null;
+  onActive: (field: string | null) => void;
+}) {
+  return <span id={target || undefined} tabIndex={matched ? 0 : undefined}
+    onMouseEnter={() => { if (matched) onActive(field); }} onMouseLeave={() => onActive(null)}
+    onFocus={() => { if (matched) onActive(field); }} onBlur={() => onActive(null)}
+    className={`rounded-sm outline-offset-2 ${active ? 'bg-accent-soft/70 ring-2 ring-accent-deep' : ''} ${matched ? 'focus:outline-2 focus:outline-accent-deep' : ''}`}>
+    {value}
+  </span>;
 }

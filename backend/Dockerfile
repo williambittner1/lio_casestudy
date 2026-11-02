@@ -6,6 +6,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# OCR is used for scanned pages and large background images containing text.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first for better layer caching
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .

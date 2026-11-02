@@ -16,6 +16,7 @@ from app.core.security import hash_password
 from app.data.articles import ARTICLES
 from app.data.commodity_groups import COMMODITY_GROUPS
 from app.data.suppliers import SUPPLIERS
+from app.services.acme_categories import OFFICE_SUPPLIES_ROW
 from app.db.session import SessionLocal
 from app.models import (
     Article,
@@ -57,7 +58,7 @@ def seed_commodity_groups(db: Session) -> int:
     existing = set(db.scalars(select(CommodityGroup.id)))
     new = [
         CommodityGroup(id=cg_id, category=category, name=name)
-        for cg_id, category, name in COMMODITY_GROUPS
+        for cg_id, category, name in [*COMMODITY_GROUPS, OFFICE_SUPPLIES_ROW]
         if cg_id not in existing
     ]
     db.add_all(new)
